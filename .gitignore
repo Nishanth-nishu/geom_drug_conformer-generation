@@ -1,0 +1,29 @@
+# Temporary / Reference repositories
+.temp/
+
+# Virtual Environments
+venv/
+env/
+.env
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data & Checkpoints
+data/qm9_raw/
+checkpoints/
+*.pt
+*.pth
+
+# Logs and outputs
+logs/
+generated/
+debug_run.log
+*.log
+
+# IDE / System
+.idea/
+.vscode/
+.DS_Store

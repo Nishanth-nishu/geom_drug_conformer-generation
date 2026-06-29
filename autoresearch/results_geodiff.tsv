@@ -1,0 +1,14 @@
+ckpt	cov_r_05	mat_r_mean	mat_r_med	cov_p_05	mat_p_mean	n_evaluated	description
+exp_A_baseline_best.pt	1.000000	0.185852	0.182123	0.988000	0.209352	100	ExpA baseline smoke-test heavy-atom
+exp_G_heavy_atom_sota_ddp_best.pt	0.996667	0.172229	0.150383	0.923333	0.243608	300	ExpG-DDP ep50 hidden=384 layers=8 geo_w=0.5 gpus=2
+exp_G_heavy_atom_sota_ddp_best.pt	0.996667	0.163922	0.143392	0.933000	0.235534	300	ExpG-DDP ep100 hidden=384 layers=8 geo_w=0.5 gpus=2
+exp_G_heavy_atom_sota_ddp_best.pt	0.920000	0.260658	0.241347	0.664000	0.395266	50	n_gen=5, max_atoms=9
+exp_G_heavy_atom_sota_ddp_best.pt	0.996667	0.169594	0.142658	0.929667	0.235869	300	ExpG-DDP ep150 hidden=384 layers=8 geo_w=0.5 gpus=2
+exp_G_heavy_atom_sota_ddp_best.pt	0.980000	0.231632	nan	0.710000	0.383340	50	n_gen=10, max_atoms=9
+exp_G_heavy_atom_sota_ddp_best.pt	0.996667	0.164422	0.129208	0.933333	0.230412	300	ExpG-DDP ep200 hidden=384 layers=8 geo_w=0.5 gpus=2
+exp_G_heavy_atom_sota_ddp_best.pt	0.996667	0.163634	0.130276	0.933667	0.231135	300	ExpG-DDP ep250 hidden=384 layers=8 geo_w=0.5 gpus=2
+exp_G_heavy_atom_sota_ddp_best.pt	0.996667	0.164328	0.131616	0.933333	0.229058	300	ExpG-DDP ep300 hidden=384 layers=8 geo_w=0.5 gpus=2
+exp_G_heavy_atom_sota_ddp_best.pt	0.996667	0.162980	0.126742	0.931667	0.228057	300	ExpG-DDP ep350 hidden=384 layers=8 geo_w=0.5 gpus=2
+exp_G_heavy_atom_sota_ddp_best.pt	0.996667	0.162333	0.127476	0.938000	0.224905	300	ExpG-DDP ep400 hidden=384 layers=8 geo_w=0.5 gpus=2
+exp_G_heavy_atom_sota_ddp_best.pt	0.996667	0.163494	0.130217	0.938333	0.224938	300	ExpG-DDP ep450 hidden=384 layers=8 geo_w=0.5 gpus=2
+exp_G_heavy_atom_sota_ddp_best.pt	0.996667	0.159606	0.126998	0.939000	0.225468	300	ExpG-DDP ep500 hidden=384 layers=8 geo_w=0.5 gpus=2
