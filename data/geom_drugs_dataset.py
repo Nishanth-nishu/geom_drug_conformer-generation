@@ -101,7 +101,7 @@ class GeomDrugsDataset(Dataset):
         normalize_energy: bool = False,
         seed: int = 42,
     ):
-        self.data_path       = str(data_path)
+        self.data_path       = str(Path(data_path).resolve())  # Always absolute — prevents cluster CWD bugs
         self.training_mode   = training_mode
         self.uniform_sampling = uniform_sampling
         self.return_energy   = return_energy

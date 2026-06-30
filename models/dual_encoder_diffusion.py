@@ -273,6 +273,46 @@ def eq_transform(edge_scores: torch.Tensor,
     return score_pos
 
 
+# =============================================================================
+# MLP EDGE ENCODER  (matches GeoDiff drugs_default.yml — MLPEdgeEncoder)
+# =============================================================================
+
+class MLPEdgeEncoder(nn.Module):
+    """
+    GeoDiff-style edge encoder: distance MLP gates bond type embedding.
+
+    Key insight: d_emb * bond_emb (multiplicative) is more expressive than
+    cat([rbf, bond_emb]) → Linear (additive). The distance MODULATES the bond
+    type signal — physically meaningful (same bond type at different distances
+    should give different features).
+
+    Reference: GeoDiff models/encoder/edge.py MLPEdgeEncoder
+    """
+    def __init__(self, hidden_dim: int = 128, num_bond_types: int = 100):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.bond_emb = nn.Embedding(num_bond_types, hidden_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        nn.init.xavier_uniform_(self.mlp[0].weight)
+        nn.init.xavier_uniform_(self.mlp[2].weight)
+
+    @property
+    def out_channels(self) -> int:
+        return self.hidden_dim
+
+    def forward(self,
+                edge_length: torch.Tensor,  # (E, 1) in Angstrom
+                edge_type: torch.Tensor,    # (E,) Long
+                ) -> torch.Tensor:          # (E, H)
+        d_emb = self.mlp(edge_length.float())                          # (E, H)
+        b_emb = self.bond_emb(edge_type.long().clamp(0, self.bond_emb.num_embeddings - 1)).float()  # (E, H)
+        return d_emb * b_emb  # multiplicative gating: distance modulates bond signal
+
+
 def gaussian_smearing(dist: torch.Tensor,
                        start: float = 0.0,
                        stop: float = 10.0,
@@ -681,12 +721,12 @@ class DualEncoderDenoiser(nn.Module):
             num_attn_heads=num_attn_heads,
         )
 
-        # ── Edge feature encoder (distance + bond type → RBF + type embed) ──
-        # Edge type embedding: Long index → H-dim float
-        # Output H so that cat([rbf_G, embed_H]) = G+H = num_gaussians+hidden_dim
-        # which is exactly what edge_encoder_local expects as input
-        self.edge_type_embed_local = nn.Embedding(num_edge_types + 1, hidden_dim)
-        self.edge_type_embed_global = nn.Embedding(num_edge_types + 1, hidden_dim)
+        # ── Edge feature encoders (MLPEdgeEncoder — GeoDiff design) ─────────
+        # Both local and global use the same encoder architecture (GeoDiff line 210:
+        # edge_attr_local = self.edge_encoder_global(...) — shared encoder design)
+        # num_bond_types=100 covers original bonds (1-5) + higher-order (6, 7, 8) + radius (0)
+        self.edge_encoder_local  = MLPEdgeEncoder(hidden_dim=hidden_dim, num_bond_types=100)
+        self.edge_encoder_global = MLPEdgeEncoder(hidden_dim=hidden_dim, num_bond_types=100)
 
         # ── Time conditioning ────────────────────────────────────────────────
         self.time_mlp = nn.Sequential(
@@ -697,20 +737,9 @@ class DualEncoderDenoiser(nn.Module):
 
         # ── Score prediction heads (pairwise features → scalar score per edge) ──
         # Input: [h_i * h_j (H) + edge_attr (H)] = 2H — matches GeoDiff exactly
-        # Edge encoder: (RBF G + edge_type H) → H
-        self.edge_encoder_local = nn.Sequential(
-            nn.Linear(num_gaussians + hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-        self.edge_encoder_global = nn.Sequential(
-            nn.Linear(num_gaussians, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-
+        # MLPEdgeEncoder outputs H, so total input is 2H
         self.grad_local_mlp = nn.Sequential(
-            nn.Linear(2 * hidden_dim, hidden_dim),  # 2H: h_i*h_j (H) + edge_attr (H)
+            nn.Linear(2 * hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.SiLU(),
@@ -777,15 +806,10 @@ class DualEncoderDenoiser(nn.Module):
             torch.zeros(num_global, dtype=torch.bool, device=pos.device),
         ])
 
-        # ── Step 2: Edge features ─────────────────────────────────────────────
-        # Gaussian smearing for distance encoding
-        rbf_local = gaussian_smearing(edge_len_local, 0.0, self.cutoff,
-                                       self.global_encoder.num_gaussians)  # (E_local, G)
+        # ── Step 2: Gaussian RBF for SchNet global encoder (CFConv still needs RBF) ──
+        # MLPEdgeEncoder in score heads uses raw distances directly (not RBF)
         rbf_global_all = gaussian_smearing(edge_len_full, 0.0, self.cutoff,
                                             self.global_encoder.num_gaussians)  # (E_total, G)
-
-        # (edge_feat_local is built on-the-fly in Step 6 via edge_encoder_local)
-        # No pre-computation needed here — avoids accidentally mixing Long into float ops.
 
         # ── Step 3: Time embedding (add to atom features via broadcast) ───────
         t_emb = sinusoidal_timestep_embedding(t, self.time_mlp[0].in_features)
@@ -805,26 +829,25 @@ class DualEncoderDenoiser(nn.Module):
             atom_types, edge_index_full, edge_len_full, rbf_global_all, edge_vec_full)
         h_global = h_global + t_emb[batch]  # add timestep conditioning
 
-        # ── Step 6: Pairwise features → edge scores (GeoDiff assemble_atom_pair_feature) ────
-        # Local: node product + encoded edge attr → 2H input
+        # ── Step 6: Pairwise features → edge scores (GeoDiff assemble_atom_pair_feature) ─
+        # MLPEdgeEncoder: distance MLP * bond_emb — multiplicative gating (GeoDiff design)
         row_l, col_l = edge_index_local
-        rbf_local_enc = self.edge_encoder_local(
-            torch.cat([rbf_local, self.edge_type_embed_local(
-                edge_type_local.clamp(0, self.edge_type_embed_local.num_embeddings - 1)
-            )], dim=-1)
-        )  # (E_local, H)
-        h_pair_local = h_local[row_l] * h_local[col_l]        # (E_local, H)
-        score_input_local = torch.cat([h_pair_local, rbf_local_enc], dim=-1)  # (E_local, 2H)
-        edge_inv_local = self.grad_local_mlp(score_input_local)   # (E_local, 1)
+        edge_attr_local = self.edge_encoder_local(
+            edge_len_local, edge_type_local
+        )  # (E_local, H) — raw distance + bond type, multiplicative
+        h_pair_local = h_local[row_l] * h_local[col_l]              # (E_local, H)
+        score_input_local = torch.cat([h_pair_local, edge_attr_local], dim=-1)  # (E_local, 2H)
+        edge_inv_local = self.grad_local_mlp(score_input_local)      # (E_local, 1)
 
-        # Global: node product + RBF encoded → 2H input
+        # Global: node product + MLPEdgeEncoder(distance, type=0 for radius edges)
         row_g, col_g = edge_index_global
-        rbf_g_only = gaussian_smearing(edge_len_global, 0.0, self.cutoff,
-                                        self.global_encoder.num_gaussians)  # (E_global, G)
-        rbf_global_enc = self.edge_encoder_global(rbf_g_only)     # (E_global, H)
-        h_pair_global = h_global[row_g] * h_global[col_g]         # (E_global, H)
-        score_input_global = torch.cat([h_pair_global, rbf_global_enc], dim=-1)  # (E_global, 2H)
-        edge_inv_global = self.grad_global_mlp(score_input_global) # (E_global, 1)
+        edge_type_global_zeros = torch.zeros(edge_len_global.size(0), dtype=torch.long, device=pos.device)
+        edge_attr_global = self.edge_encoder_global(
+            edge_len_global, edge_type_global_zeros
+        )  # (E_global, H)
+        h_pair_global = h_global[row_g] * h_global[col_g]           # (E_global, H)
+        score_input_global = torch.cat([h_pair_global, edge_attr_global], dim=-1)  # (E_global, 2H)
+        edge_inv_global = self.grad_global_mlp(score_input_global)   # (E_global, 1)
 
         return (edge_inv_global, edge_inv_local,
                 edge_index_full, edge_type_full, edge_len_full, local_mask,
@@ -1084,23 +1107,32 @@ class DualEncoderDiffusion(nn.Module):
 
             eps_pos = f_local + f_global * w_global
 
-            # DDPM-noisy update (GeoDiff Eq. 10)
+            # Correct unscaled DDPM update rule (GeoDiff)
             at = a_cumprod[i]
             at_next = a_cumprod[j] if j >= 0 else torch.ones(1, device=device)
 
             beta_t = 1.0 - at / at_next
-            e = -eps_pos
-            pos0_from_e = (1.0 / at).sqrt() * pos - (1.0 / at - 1).sqrt() * e
+            e = -eps_pos  # network predicts -epsilon
 
-            mean_eps = (
-                (at_next.sqrt() * beta_t) * pos0_from_e +
-                ((1 - beta_t).sqrt() * (1 - at_next)) * pos
-            ) / (1.0 - at).clamp(min=1e-8)
+            # Since pos is unscaled: x_t = x_0 + sigma_t * e
+            sigma_t = (1.0 / at - 1.0).sqrt()
+            pos0_from_e = pos - sigma_t * e
 
+            # Mean for unscaled x_{t-1}
+            c1 = beta_t / (1.0 - at).clamp(min=1e-8)
+            c2 = (1.0 - beta_t) * (1.0 - at_next) / (1.0 - at).clamp(min=1e-8)
+            mean_eps = c1 * pos0_from_e + c2 * pos
+
+            # Variance for unscaled x_{t-1}
+            # Note: standard var is beta_t * (1 - at_next) / (1 - at)
+            # Unscaled var requires dividing by at_next
+            var_eps = beta_t * (1.0 - at_next) / ((1.0 - at).clamp(min=1e-8) * at_next.clamp(min=1e-8))
+            
             noise = torch.randn_like(pos)
             mask = 1.0 - (torch.tensor(i, device=device) == 0).float()
-            logvar = beta_t.log().clamp(min=-20)
-            pos = mean_eps + mask * torch.exp(0.5 * logvar) * noise
+            
+            # Update pos
+            pos = mean_eps + mask * torch.sqrt(var_eps.clamp(min=1e-8)) * noise
 
             if torch.isnan(pos).any():
                 print(f'  [Warning] NaN at step {i}, resetting to mean')
@@ -1153,9 +1185,25 @@ class DualEncoderDiffusion(nn.Module):
             f_global = eq_transform(edge_inv_global, pos, edge_index_global, edge_len_global)
             eps_pos = f_local + f_global * self.w_global
 
+            # ── 3. DDPM-noisy update in unscaled space ──
             at = a_cumprod[i]
             at_next = a_cumprod[j] if j >= 0 else torch.ones(1, device=device)
+
+            beta_t = 1.0 - at / at_next
             e = -eps_pos
+
+            sigma_t = (1.0 / at - 1.0).sqrt()
+            pos0_from_e = pos - sigma_t * e
+
+            c1 = beta_t / (1.0 - at).clamp(min=1e-8)
+            c2 = (1.0 - beta_t) * (1.0 - at_next) / (1.0 - at).clamp(min=1e-8)
+            mean_eps = c1 * pos0_from_e + c2 * pos
+
+            var_eps = beta_t * (1.0 - at_next) / ((1.0 - at).clamp(min=1e-8) * at_next.clamp(min=1e-8))
+            
+            noise = torch.randn_like(pos)
+            mask = 1.0 - (torch.tensor(i, device=device) == 0).float()
+            pos = mean_eps + mask * torch.sqrt(var_eps.clamp(min=1e-8)) * noise
             pos0_pred = (1.0 / at).sqrt() * pos - (1.0 / at - 1).sqrt() * e
 
             # Energy guidance — stronger when denoising is near final (low t → small σ)

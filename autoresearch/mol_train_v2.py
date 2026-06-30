@@ -25,7 +25,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR   = SCRIPT_DIR.parent
@@ -146,7 +146,7 @@ def train(args):
 
     # ── Data ──────────────────────────────────────────────────────────────────
     train_loader, val_loader = make_geom_dataloaders(
-        data_path=args.data,
+        data_path=str(Path(args.data).resolve()),  # absolute path — prevents cluster CWD crash
         max_atoms=args.max_atoms,
         min_conformers=args.min_confs,
         max_conformers=args.max_confs,
@@ -186,9 +186,12 @@ def train(args):
     initial_lr = args.lr
     optimizer = optim.AdamW(model.parameters(), lr=initial_lr,
                              betas=(BETA1, BETA2), weight_decay=WEIGHT_DECAY)
-    # ReduceLROnPlateau (GeoDiff: factor=0.6, patience=10)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.6, patience=10,
-                                   min_lr=1e-6)
+    # CosineAnnealingWarmRestarts: LR restarts periodically — never gets frozen
+    # T_0=50: first restart at epoch 50, T_mult=2: each cycle doubles (50→100→200)
+    # This prevents the ReduceLROnPlateau collapse to 2e-6 that killed the previous run
+    scheduler = CosineAnnealingWarmRestarts(
+        optimizer, T_0=50, T_mult=2, eta_min=1e-6
+    )
 
     # Warmup: linear LR ramp
     warmup_steps = WARMUP_EPOCHS * len(train_loader)
@@ -306,9 +309,9 @@ def train(args):
               f"val={avg_val:.4f} | "
               f"lr={get_lr(optimizer):.2e} | {elapsed:.1f}min")
 
-        # LR scheduler step (after warmup)
+        # LR scheduler step (after warmup) — CosineAnnealingWarmRestarts takes epoch number
         if global_step >= warmup_steps:
-            scheduler.step(avg_val)
+            scheduler.step(epoch)
 
         # ── Geometry eval every EVAL_EVERY epochs ─────────────────────────
         if epoch % EVAL_EVERY == 0 or args.smoke_test:

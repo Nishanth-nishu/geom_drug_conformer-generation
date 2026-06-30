@@ -1,27 +1,15 @@
 #!/bin/bash
 # =============================================================================
 # submit_v2_full.sh — GeoDiff-Novel  |  max_heavy=100  |  Full GEOM-Drugs
-# =============================================================================
-# Goal: Full GEOM-Drugs benchmark matching GeoDiff paper exactly.
-# All 96,418 molecules (up to 100 heavy atoms).
-#
-# Why 100 atoms (full)?
-#   - This is the EXACT benchmark GeoDiff/TorDiff/ConfGF papers use
-#   - Direct apples-to-apples comparison for paper submission
-#   - Harder: longer training (~12-15 min/epoch)
-#   - Submit this AFTER small/medium confirm COV-R > 0%
-#
-# IMPORTANT: Run small and medium first. Only submit this if:
-#   - small experiment gives COV-R > 10% by epoch 50
-#   - medium experiment gives COV-R > 5% by epoch 50
+# FIXED: absolute data path + 5000 timesteps (GeoDiff canonical for Drugs)
 # =============================================================================
 #SBATCH --job-name=geom_v2_full
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=2-00:00:00
-#SBATCH --output=logs/geom_v2_full_%j.log
-#SBATCH --error=logs/geom_v2_full_%j.log
+#SBATCH --output=/scratch/nishanth.r/nextmol_experiment/mol_expermiments/logs/geom_v2_full_%j.log
+#SBATCH --error=/scratch/nishanth.r/nextmol_experiment/mol_expermiments/logs/geom_v2_full_%j.log
 
 echo "=========================================="
 echo "SLURM_JOB_ID = $SLURM_JOB_ID"
@@ -37,6 +25,15 @@ echo "=========================================="
 cd /scratch/nishanth.r/nextmol_experiment/mol_expermiments
 source venv/bin/activate
 
+# Absolute path — prevents mid-training FileNotFoundError on cluster
+DATA=/scratch/nishanth.r/nextmol_experiment/mol_expermiments/data/geom_drugs.jsonl
+
+if [ ! -f "$DATA" ]; then
+    echo "[ERROR] Dataset not found: $DATA"
+    exit 1
+fi
+echo "Dataset: $DATA ($(wc -l < $DATA) molecules)"
+
 # ── Smoke test first ────────────────────────────────────────────────────────
 echo ""
 echo "Step 1: Smoke test ..."
@@ -48,10 +45,14 @@ PYTHONPATH=. python3 autoresearch/mol_train_v2.py \
     --batch-size 16 \
     --lr         1e-3 \
     --hidden-dim 256 \
-    --num-timesteps 2000 \
-    --data       data/geom_drugs.jsonl
+    --num-timesteps 5000 \
+    --data       $DATA
 
-echo "Smoke test done."
+if [ $? -ne 0 ]; then
+    echo "[ERROR] Smoke test failed — aborting."
+    exit 1
+fi
+echo "Smoke test passed."
 
 # ── Full training ───────────────────────────────────────────────────────────
 echo ""
@@ -63,9 +64,9 @@ PYTHONPATH=. python3 autoresearch/mol_train_v2.py \
     --batch-size 16 \
     --lr         1e-3 \
     --hidden-dim 256 \
-    --num-timesteps 2000 \
+    --num-timesteps 5000 \
     --epochs     300 \
-    --data       data/geom_drugs.jsonl
+    --data       $DATA
 
 echo ""
 echo "Job completed: $(date)"
