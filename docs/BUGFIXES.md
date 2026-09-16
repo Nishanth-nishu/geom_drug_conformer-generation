@@ -5,19 +5,24 @@ on GEOM-Drugs, and later plateaued at a training-invariant floor even after
 the obvious bugs were fixed. This document records what was actually wrong
 and what changed, file by file.
 
-## 1. Coordinate-space convention mismatch
+## 1. Mismatched diffusion-variable representation
 
-The forward noising process built `x_t` with GeoDiff's own *unscaled*
-convention (`x_t = x_0 + σ_t·ε`), but the reverse-sampling update used
-coefficients derived for the DDPM-standard *scaled* convention
-(`x_t = √ᾱ_t·x_0 + √(1-ᾱ_t)·ε`). These aren't interchangeable — the reverse
-update assumes a specific relationship between `x_t`, `x_0`, and `ε` that
-only holds under one convention. Denoising with mismatched coefficients
-compounds a small scale error across thousands of reverse steps into
-outright coordinate explosion.
+GeoDiff's paper defines the standard scaled DDPM forward process,
+`C_t = √ᾱ_t·C_0 + √(1-ᾱ_t)·ε`. Its official implementation (and this
+project's `q_sample`) works instead with the rescaled variable
+`C̃_t = C_t/√ᾱ_t = C_0 + √((1-ᾱ_t)/ᾱ_t)·ε` — the same forward process, just
+divided through by `√ᾱ_t`. One reverse-sampling code path was recovering
+`C_0` with the inversion formula valid for the *raw* scaled `C_t`
+(`(1/√ᾱ_t)·C_t − √(1/ᾱ_t−1)·ε`) but applying it to `pos`, which was actually
+already in the rescaled `C̃_t` form the rest of the codebase uses — where the
+correct inversion is the simpler `C_0 = C̃_t − √((1-ᾱ_t)/ᾱ_t)·ε`, no extra
+`1/√ᾱ_t` factor. At `t` near `T`, `1/√ᾱ_t` blows up (~300x at this project's
+schedule), so mixing the two representations compounds into outright
+coordinate explosion.
 
-**Fix:** made forward noising and the reverse update consistently use the
-same (unscaled) convention throughout `models/dual_encoder_diffusion.py`.
+**Fix:** made every reverse-sampling code path consistently use the same
+rescaled-`C̃_t` inversion formula that `q_sample` and GeoDiff's own code use,
+in `models/dual_encoder_diffusion.py`.
 
 ## 2. Data pipeline standardization
 
