@@ -34,6 +34,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from torch.utils.data import Subset
 
 BOLTZMANN_KT_KCAL = 0.5921  # kT at 298K in kcal/mol (= 1.987e-3 * 298)
 
@@ -264,13 +265,33 @@ def run_geom_drugs_eval(
     Run GEOM-Drugs COV-R/MAT-R/COV-P/MAT-P + v2 Bw-COV-R/MEE evaluation.
 
     For each molecule in the validation set (up to n_mols):
-      1. Retrieve the lowest-energy reference conformer from the batch.
+      1. Retrieve ALL ground-truth reference conformers for that molecule
+         (multi-reference, matching GeoDiff/TorDiff's own COV-R/MAT-R
+         protocol -- see FIX note below).
       2. Generate n_gen conformers using (optionally energy-guided) DDIM.
       3. Compute COV-R, MAT-R, COV-P, MAT-P per molecule.
-      4. Compute Bw-COV-R (if energies available) and MEE (if surrogate available).
+      4. Compute Bw-COV-R (Boltzmann-weighted over the real multi-conformer
+         reference set) and MEE (if surrogate available).
 
     Returns:
         dict with mean COV-R, MAT-R, COV-P, MAT-P, Bw-COV-R, MEE, and lists.
+
+    FIX: this previously scored
+    against a SINGLE reference conformer per molecule (whichever one the
+    training-mode sampler happened to draw for that DataLoader batch),
+    unlike GeoDiff's/TorDiff's own protocol of scoring against ALL surviving
+    ground-truth conformers per molecule (see GeoDiff utils/evaluation/
+    covmat.py and TorsionalDiffusion evaluate_confs.py). A single fixed
+    target is structurally harder to "cover" than any-of-N real references,
+    so this deflated COV-R (and affected MAT-R) independent of true
+    generative quality, making the printed numbers non-comparable to the
+    GeoDiff/TorDiff SOTA figures printed alongside them. Now iterates the
+    underlying dataset directly by index (bypassing the DataLoader's
+    single-conformer-per-item batching, which exists for training, not
+    eval) and uses `get_reference_coords()`/`get_all_conformers()` to pull
+    every QC-surviving conformer as the reference set. Falls back to the
+    old single-reference behavior only if the dataset doesn't support
+    multi-reference lookup (e.g. a legacy non-GeomDrugsDataset).
     """
     model.eval()
     if energy_surrogate is not None:
@@ -284,92 +305,94 @@ def run_geom_drugs_eval(
     n_done = 0
     t0 = time.time()
 
-    for batch in val_loader:
-        if n_done >= n_mols:
-            break
+    # Resolve the underlying dataset + index mapping, unwrapping a Subset
+    # (used by the legacy random-split path) if present.
+    raw_dataset = val_loader.dataset
+    if isinstance(raw_dataset, Subset):
+        base_dataset = raw_dataset.dataset
+        index_map = raw_dataset.indices
+    else:
+        base_dataset = raw_dataset
+        index_map = range(len(raw_dataset))
 
-        at = batch['atom_types'].to(device)
-        co = batch['coordinates'].to(device)
-        ei = batch['edge_index'].to(device)
-        bt = batch['bond_types'].to(device)
-        bi = batch['batch_idx'].to(device)
+    supports_multi_ref = hasattr(base_dataset, 'get_reference_coords')
+    n_available = min(n_mols, len(index_map))
 
-        # Energy info for Bw-COV-R and MEE
-        energy_norm = batch.get('energy_norm', None)
-        bw_weights  = batch.get('boltzmann_weights', None)
+    for pos in range(n_available):
+        real_idx = index_map[pos]
 
-        n_mols_batch = int(bi.max().item()) + 1
+        item = base_dataset[real_idx]
+        at_b = item['atom_types'].to(device)
+        ei_b_local = item['edge_index'].to(device)
+        bt_b = item['bond_types'].to(device)
+        bi_b = torch.zeros(at_b.size(0), dtype=torch.long, device=device)
 
-        for b_idx in range(n_mols_batch):
-            if n_done >= n_mols:
-                break
+        if at_b.size(0) < 3:
+            continue
 
-            mol_mask  = (bi == b_idx)
-            edge_mask = (bi[ei[0]] == b_idx) & (bi[ei[1]] == b_idx)
-
-            if mol_mask.sum() < 3:
-                continue
-
-            at_b  = at[mol_mask]
-            co_b  = co[mol_mask]
-            ei_b  = ei[:, edge_mask]
-            bt_b  = bt[edge_mask]
-            bi_b  = torch.zeros(mol_mask.sum(), dtype=torch.long, device=device)
-
-            # Re-index edge_index to local (0-based) atom indices
-            atom_global = mol_mask.nonzero(as_tuple=True)[0]
-            g2l = {int(g): l for l, g in enumerate(atom_global.tolist())}
-            ei_b_local = torch.stack([
-                torch.tensor([g2l[int(i)] for i in ei_b[0].tolist()], device=device),
-                torch.tensor([g2l[int(i)] for i in ei_b[1].tolist()], device=device),
-            ])
-
-            ref_np = co_b.cpu().numpy()
-            refs   = [ref_np]
-
-            # Reference energy for MEE
-            ref_e_norm = float(energy_norm[b_idx].item()) if energy_norm is not None else None
-
-            # Generate n_gen conformers
-            gens_tensors = generate_conformers(
-                model, at_b, ei_b_local, bt_b, bi_b,
-                n_gen=n_gen,
-                num_steps=num_steps,
-                energy_surrogate=energy_surrogate,
-                guidance_scale=guidance_scale,
-                guidance_power=guidance_power,
-                device=device,
+        if supports_multi_ref:
+            refs = [c.numpy() for c in base_dataset.get_reference_coords(real_idx)]
+            ref_confs = base_dataset.get_all_conformers(real_idx)
+            ref_energies_kcal = [
+                float(c['energy_kcal'].item()) for c in ref_confs
+                if 'energy_kcal' in c
+            ]
+        else:
+            refs = [item['coordinates'].numpy()]
+            ref_energies_kcal = (
+                [float(item['energy_kcal'].item())] if 'energy_kcal' in item else []
             )
 
-            if not gens_tensors:
-                n_done += 1
-                continue
+        if not refs:
+            continue
+        ref_np = refs[0]  # lowest-energy reference, for the scalar RMSD-mean stat
 
-            gens = [g.numpy() for g in gens_tensors]
+        # Reference energy for MEE: lowest (normalized) energy among references
+        ref_e_norm = float(item['energy_norm'].item()) if 'energy_norm' in item else None
 
-            # Standard COV-MAT
-            cr, mr, cp, mp = cov_mat(refs, gens, threshold=cov_threshold)
-            cov_r_list.append(cr)
-            mat_r_list.append(mr)
-            cov_p_list.append(cp)
-            mat_p_list.append(mp)
-            rmsd_list.append(kabsch_rmsd(gens[0], ref_np))
+        # Generate n_gen conformers
+        gens_tensors = generate_conformers(
+            model, at_b, ei_b_local, bt_b, bi_b,
+            n_gen=n_gen,
+            num_steps=num_steps,
+            energy_surrogate=energy_surrogate,
+            guidance_scale=guidance_scale,
+            guidance_power=guidance_power,
+            device=device,
+        )
 
-            # Bw-COV-R (single reference only has one conformer — trivially 1.0 if covered)
-            # We use standard COV-R here since we only have one reference
-            # Full Bw-COV-R requires multi-conformer test set
-            bw_cov_r_list.append(cr)   # same as COV-R with single ref conformer
-
-            # MEE: mean energy error
-            if energy_surrogate is not None and ref_e_norm is not None:
-                mee = mean_energy_error(
-                    gens_tensors, at_b, ei_b_local, bt_b, bi_b,
-                    energy_surrogate, ref_e_norm, device
-                )
-                if not np.isnan(mee):
-                    mee_list.append(mee)
-
+        if not gens_tensors:
             n_done += 1
+            continue
+
+        gens = [g.numpy() for g in gens_tensors]
+
+        # Standard COV-MAT (now genuinely multi-reference when supported)
+        cr, mr, cp, mp = cov_mat(refs, gens, threshold=cov_threshold)
+        cov_r_list.append(cr)
+        mat_r_list.append(mr)
+        cov_p_list.append(cp)
+        mat_p_list.append(mp)
+        rmsd_list.append(kabsch_rmsd(gens[0], ref_np))
+
+        # Bw-COV-R: genuine Boltzmann-weighted coverage when energies for
+        # every reference conformer are available; falls back to plain
+        # COV-R (as before) when they aren't.
+        if len(ref_energies_kcal) == len(refs) and len(refs) > 1:
+            bw_cov_r_list.append(bw_cov_r(refs, gens, ref_energies_kcal, threshold=cov_threshold))
+        else:
+            bw_cov_r_list.append(cr)
+
+        # MEE: mean energy error
+        if energy_surrogate is not None and ref_e_norm is not None:
+            mee = mean_energy_error(
+                gens_tensors, at_b, ei_b_local, bt_b, bi_b,
+                energy_surrogate, ref_e_norm, device
+            )
+            if not np.isnan(mee):
+                mee_list.append(mee)
+
+        n_done += 1
 
         if verbose and n_done % 20 == 0 and n_done > 0:
             elapsed = time.time() - t0

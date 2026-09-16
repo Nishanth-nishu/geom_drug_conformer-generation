@@ -32,7 +32,7 @@ ROOT_DIR   = SCRIPT_DIR.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from models.dual_encoder_diffusion import DualEncoderDiffusion, remove_com
-from data.geom_drugs_dataset import make_geom_dataloaders
+from data.geom_drugs_dataset import make_geom_dataloaders, make_geom_dataloaders_from_split
 from autoresearch.geom_drugs_eval import run_geom_drugs_eval, print_geom_results
 
 # ── Hyperparameters ────────────────────────────────────────────────────────────
@@ -109,7 +109,15 @@ def parse_args():
                    help='Neighbor radius cutoff in Angstrom (GeoDiff: 10.0)')
     p.add_argument('--exp-name', type=str, default=None,
                    help='Override experiment name')
-    p.add_argument('--data', type=str, default='data/geom_drugs.jsonl')
+    p.add_argument('--data', type=str, default='data/geom_drugs.jsonl',
+                   help='Legacy single-file mode: internal random split (NOT '
+                        'comparable to published numbers -- see --train-data/--val-data)')
+    p.add_argument('--train-data', type=str, default=None,
+                   help='Standardized split mode: path to geom_drugs_train.jsonl '
+                        '(from prepare_geom_drugs_standard.py, GeoMol canonical split). '
+                        'When set together with --val-data, overrides --data entirely.')
+    p.add_argument('--val-data', type=str, default=None,
+                   help='Standardized split mode: path to geom_drugs_val.jsonl')
     p.add_argument('--resume', type=str, default=None,
                    help='Path to checkpoint to resume from')
     return p.parse_args()
@@ -127,16 +135,43 @@ def count_parameters(model):
 
 def train(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # FIX: exp_name (and therefore
+    # every checkpoint filename) previously never encoded which data pipeline
+    # was used -- a legacy-split run and a standardized-split run with
+    # identical other flags produced identical checkpoint paths and silently
+    # overwrote each other. `_std` vs `_legacy` tag added below.
     if args.exp_name:
         exp_name = args.exp_name
     else:
+        data_tag = "std" if (args.train_data is not None and args.val_data is not None) else "legacy"
         exp_name = (f"v2_dual_{args.hidden_dim}h_{NUM_CONVS_GLOBAL}gconv_{NUM_CONVS_LOCAL}lconv"
                     f"_atoms{args.max_atoms}_mols{args.max_mols//1000}k"
-                    f"_confs{args.max_confs}_T{args.num_timesteps}")
+                    f"_confs{args.max_confs}_T{args.num_timesteps}_{data_tag}")
+
+    use_standard_split = args.train_data is not None and args.val_data is not None
+
+    # FIX: supplying only ONE
+    # of --train-data/--val-data used to silently fall back to the legacy
+    # ad-hoc-split path with no warning -- a real risk of burning a multi-day
+    # run on non-comparable data by a simple flag typo. Now a hard error.
+    if (args.train_data is not None) != (args.val_data is not None):
+        raise SystemExit(
+            "[FATAL] --train-data and --val-data must both be set together "
+            "(standardized-split mode), or both left unset (legacy --data "
+            "mode). Got train_data={!r} val_data={!r} -- refusing to silently "
+            "fall back to the legacy random split.".format(args.train_data, args.val_data)
+        )
 
     print(f"Device      : {device}")
     print(f"Experiment  : {exp_name}")
-    print(f"Data        : {args.data}")
+    if use_standard_split:
+        print(f"Data        : STANDARDIZED SPLIT (GeoMol canonical, see "
+              f"docs/GEOM_DRUGS_DIAGNOSIS_AND_PLAN.md)")
+        print(f"  train     : {args.train_data}")
+        print(f"  val       : {args.val_data}")
+    else:
+        print(f"Data        : {args.data}  [LEGACY internal random split -- "
+              f"NOT comparable to published GEOM-Drugs numbers]")
     print(f"max_atoms   : {args.max_atoms}  max_mols: {args.max_mols}  max_confs: {args.max_confs}")
     print(f"β schedule  : sigmoid, T={args.num_timesteps}, β_start={args.beta_start}, β_end={args.beta_end}")
     print(f"Neighbor r  : {args.cutoff} Å")
@@ -145,18 +180,39 @@ def train(args):
     os.makedirs('logs', exist_ok=True)
 
     # ── Data ──────────────────────────────────────────────────────────────────
-    train_loader, val_loader = make_geom_dataloaders(
-        data_path=str(Path(args.data).resolve()),  # absolute path — prevents cluster CWD crash
-        max_atoms=args.max_atoms,
-        min_conformers=args.min_confs,
-        max_conformers=args.max_confs,
-        max_mols=args.max_mols,
-        batch_size=args.batch_size,
-        num_workers=4,
-        val_split=0.1,
-        return_energy=True,
-        uniform_sampling=True,
-    )
+    if use_standard_split:
+        # FIX: this used to
+        # hardcode min_conformers=1, silently ignoring --min-confs for anyone
+        # using the standardized-split path. Now honors args.min_confs like
+        # the legacy branch does -- note the *argparse default* for
+        # --min-confs is still MIN_CONFORMERS (2); pass --min-confs 1
+        # explicitly if you want to keep single-clean-conformer molecules
+        # that survived prepare_geom_drugs_standard.py's connectivity QC.
+        train_loader, val_loader = make_geom_dataloaders_from_split(
+            train_path=str(Path(args.train_data).resolve()),
+            val_path=str(Path(args.val_data).resolve()),
+            max_atoms=args.max_atoms,
+            min_conformers=args.min_confs,
+            max_conformers=args.max_confs,
+            max_mols=args.max_mols,
+            batch_size=args.batch_size,
+            num_workers=4,
+            return_energy=True,
+            uniform_sampling=True,
+        )
+    else:
+        train_loader, val_loader = make_geom_dataloaders(
+            data_path=str(Path(args.data).resolve()),  # absolute path — prevents cluster CWD crash
+            max_atoms=args.max_atoms,
+            min_conformers=args.min_confs,
+            max_conformers=args.max_confs,
+            max_mols=args.max_mols,
+            batch_size=args.batch_size,
+            num_workers=4,
+            val_split=0.1,
+            return_energy=True,
+            uniform_sampling=True,
+        )
     print(f"\nModel arch  : DualEncoderDiffusion (distance-space score matching)")
 
     # ── Model ─────────────────────────────────────────────────────────────────
@@ -295,8 +351,13 @@ def train(args):
                                         batch_idx, boltzmann_weights=bw)
                     val_loss += ld['total'].item()
                     n_val += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    # FIX: this used
+                    # to be a bare `except Exception: pass` with zero logging --
+                    # if every validation batch failed, avg_val would silently
+                    # report 0.0000 (indistinguishable from an excellent loss)
+                    # with no trace of why. Now logged once per occurrence.
+                    print(f"  [Validation batch error, skipped] {e}")
 
         avg_train = total_loss / max(n_batches, 1)
         avg_local = total_local / max(n_batches, 1)
@@ -312,6 +373,49 @@ def train(args):
         # LR scheduler step (after warmup) — CosineAnnealingWarmRestarts takes epoch number
         if global_step >= warmup_steps:
             scheduler.step(epoch)
+
+        # ── Cheap "latest" checkpoint every epoch (2026-09 addition) ──────────
+        # The only prior checkpointing was gated on a NEW best MAT-R, itself only
+        # computed every EVAL_EVERY=25 epochs -- on a long unattended run (e.g. a
+        # 4-day sbatch job that gets killed at the wall-clock limit, or crashes
+        # for any other reason), that could lose up to 25 epochs of real compute
+        # with nothing to --resume from. This is a plain state-dict save (cheap,
+        # no generation/sampling), separate from the expensive best-MAT-R
+        # checkpoint below.
+        torch.save({
+            'epoch': epoch,
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'best_mat_r': best_mat_r,
+            'global_step': global_step,
+            # FIX: 'cutoff'/
+            # 'beta_start'/'beta_end' used to save the hardcoded module
+            # constants instead of the actual args.* values the model was
+            # built with. Harmless for beta_start/beta_end (baked into
+            # registered buffers that load_state_dict correctly restores
+            # regardless of what's in config), but NOT harmless for cutoff --
+            # self.cutoff is a plain Python attribute, never touched by
+            # load_state_dict, so a non-default --cutoff run would have been
+            # silently reconstructed with the wrong radius-graph cutoff by
+            # any script (e.g. eval_size_generalization.py) that rebuilds the
+            # model from this config. Also added 'w_global' (previously
+            # missing entirely -- currently harmless since it matches
+            # DualEncoderDiffusion's own default, but would silently diverge
+            # if W_GLOBAL were ever changed without updating this dict).
+            'config': {
+                'hidden_dim': args.hidden_dim,
+                'num_convs_global': NUM_CONVS_GLOBAL,
+                'num_convs_local': NUM_CONVS_LOCAL,
+                'num_gaussians': NUM_GAUSSIANS,
+                'num_attn_heads': NUM_ATTN_HEADS,
+                'edge_order': EDGE_ORDER,
+                'cutoff': args.cutoff,
+                'num_timesteps': args.num_timesteps,
+                'beta_start': args.beta_start,
+                'beta_end': args.beta_end,
+                'w_global': W_GLOBAL,
+            },
+        }, f"checkpoints/{exp_name}_latest.pt")
 
         # ── Geometry eval every EVAL_EVERY epochs ─────────────────────────
         if epoch % EVAL_EVERY == 0 or args.smoke_test:
@@ -342,6 +446,7 @@ def train(args):
                         'optimizer': optimizer.state_dict(),
                         'best_mat_r': best_mat_r,
                         'global_step': global_step,
+                        # Same fix as the 'latest' checkpoint above.
                         'config': {
                             'hidden_dim': args.hidden_dim,
                             'num_convs_global': NUM_CONVS_GLOBAL,
@@ -349,10 +454,11 @@ def train(args):
                             'num_gaussians': NUM_GAUSSIANS,
                             'num_attn_heads': NUM_ATTN_HEADS,
                             'edge_order': EDGE_ORDER,
-                            'cutoff': CUTOFF,
+                            'cutoff': args.cutoff,
                             'num_timesteps': args.num_timesteps,
-                            'beta_start': BETA_START,
-                            'beta_end': BETA_END,
+                            'beta_start': args.beta_start,
+                            'beta_end': args.beta_end,
+                            'w_global': W_GLOBAL,
                         },
                     }, ckpt_path)
                     print(f"  ✓ New best MAT-R: {best_mat_r:.4f} Å saved.")

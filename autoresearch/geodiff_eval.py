@@ -41,6 +41,23 @@ def kabsch_align(P: np.ndarray, Q: np.ndarray) -> float:
     Kabsch algorithm: minimum RMSD between two point sets after optimal rotation.
     P, Q: (N, 3) numpy arrays (already centered).
     Returns scalar RMSD.
+
+    KNOWN LIMITATION (not yet fixed): this assumes a fixed, identical
+    atom-index correspondence between P and Q. TorsionalDiffusion's own
+    evaluate_confs.py defaults to RDKit's AllChem.GetBestRMS, which searches
+    over topological automorphisms (symmetric methyls, swappable ring
+    substituents, etc.) for the true minimum RMSD, only falling back to a
+    plain fixed-correspondence alignment under an explicit --only_alignmol
+    opt-out. Using fixed-correspondence Kabsch here can overstate RMSD (and
+    understate COV-R / overstate MAT-R) for molecules with symmetric
+    substructures. NOT fixed in this pass because: (1) this function only
+    receives bare (N,3) coordinate arrays, with no atom/bond information
+    available for automorphism search -- a real fix needs an interface change
+    threading atom_types/bond graphs through every call site; (2) this is a
+    shared utility used by other scripts in this project, so changing its
+    behavior deserves its own dedicated review rather than being bundled into
+    an unrelated fix pass. Flagging clearly here so it isn't mistaken for
+    "already handled."
     """
     P = P - P.mean(0)
     Q = Q - Q.mean(0)

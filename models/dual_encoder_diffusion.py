@@ -721,9 +721,12 @@ class DualEncoderDenoiser(nn.Module):
             num_attn_heads=num_attn_heads,
         )
 
-        # ── Edge feature encoders (MLPEdgeEncoder — GeoDiff design) ─────────
-        # Both local and global use the same encoder architecture (GeoDiff line 210:
-        # edge_attr_local = self.edge_encoder_global(...) — shared encoder design)
+        # ── Edge feature encoders (MLPEdgeEncoder architecture — GeoDiff design) ────
+        # Note: GeoDiff's own dualenc.py:210 reuses a single edge encoder for both
+        # local and global edges. This project instead gives local and global
+        # edges two independent MLPEdgeEncoder instances with separately-learned
+        # weights -- a deliberate design choice (arguably more expressive), not a
+        # replication of GeoDiff's single-encoder reuse.
         # num_bond_types=100 covers original bonds (1-5) + higher-order (6, 7, 8) + radius (0)
         self.edge_encoder_local  = MLPEdgeEncoder(hidden_dim=hidden_dim, num_bond_types=100)
         self.edge_encoder_global = MLPEdgeEncoder(hidden_dim=hidden_dim, num_bond_types=100)
@@ -786,6 +789,23 @@ class DualEncoderDenoiser(nn.Module):
         # 1b. Build radius graph for global interactions
         if edge_index_global is None:
             edge_index_global = build_radius_graph(pos, batch, cutoff=self.cutoff)
+
+        # FIX: build_radius_graph enumerates ALL
+        # pairs within cutoff with no exclusion of pairs already present in
+        # edge_index_local -- since bond lengths (~1-2A) are almost always far
+        # inside the cutoff (default 10A), essentially every bonded pair was
+        # being fed into edge_index_full/self.global_encoder TWICE (once under
+        # its real bond type via edge_index_local, once again under radius
+        # type 0 via edge_index_global), double-counting its contribution to
+        # h_global relative to GeoDiff's own coalesced single-edge-index
+        # construction (models/common.py's (bgraph_adj+rgraph_adj).coalesce()).
+        # Deduplicate by dropping any radius-graph edge whose (row, col) pair
+        # already exists in the local graph.
+        if edge_index_local.size(1) > 0 and edge_index_global.size(1) > 0:
+            local_keys = edge_index_local[0].to(torch.int64) * N + edge_index_local[1].to(torch.int64)
+            global_keys = edge_index_global[0].to(torch.int64) * N + edge_index_global[1].to(torch.int64)
+            keep_mask = ~torch.isin(global_keys, local_keys)
+            edge_index_global = edge_index_global[:, keep_mask]
 
         # 1c. Compute edge lengths
         edge_len_local = get_edge_distances(pos, edge_index_local)    # (E_local, 1)
@@ -1028,8 +1048,14 @@ class DualEncoderDiffusion(nn.Module):
         loss_local_per_atom = ((pred_force_local - target_force_local) ** 2).sum(-1)  # (N,)
         loss_global_per_atom = ((pred_force_global - target_force_global) ** 2).sum(-1)
 
-        # Scale by global weight (GeoDiff: local weight=5, global weight=2)
-        loss_per_atom = 5.0 * loss_local_per_atom + 2.0 * self.w_global * loss_global_per_atom
+        # Fixed GeoDiff training weights (local=5, global=2). FIX: w_global
+        # must NOT multiply the training loss -- in
+        # GeoDiff (dualenc.py get_loss_diffusion) w_global is exclusively an
+        # inference-time force-mixing coefficient for langevin_dynamics_sample*;
+        # the previous `2.0 * self.w_global * loss_global_per_atom` silently
+        # halved the intended global/local training balance at the default
+        # w_global=0.5 (effective global weight 1.0 instead of GeoDiff's fixed 2.0).
+        loss_per_atom = 5.0 * loss_local_per_atom + 2.0 * loss_global_per_atom
 
         # Reduce per molecule
         loss_per_mol = scatter_add_1d(loss_per_atom, batch, B)      # (B,)
@@ -1049,10 +1075,15 @@ class DualEncoderDiffusion(nn.Module):
 
         total_loss = (combined_weight * loss_per_mol).mean()
 
+        # FIX: these diagnostic-only breakdowns
+        # previously multiplied the *combined* loss_per_atom by each weight
+        # instead of the correct per-component loss (loss_local_per_atom /
+        # loss_global_per_atom) -- inflated, misleading numbers in training
+        # logs only; total_loss (used for backprop) was never affected.
         return {
             'total': total_loss,
-            'local': (5.0 * loss_per_atom.mean()).detach(),
-            'global': (2.0 * self.w_global * loss_per_atom.mean()).detach(),
+            'local': (5.0 * loss_local_per_atom.mean()).detach(),
+            'global': (2.0 * loss_global_per_atom.mean()).detach(),
         }
 
     # ── Sampling (DDIM) ────────────────────────────────────────────────────────
@@ -1067,10 +1098,24 @@ class DualEncoderDiffusion(nn.Module):
                     w_global: float = 0.5,
                     eta: float = 0.0,
                     clip_pos: Optional[float] = None,
+                    clip_local: Optional[float] = 1000.0,
+                    clip_global: Optional[float] = 1000.0,
                     ) -> torch.Tensor:
         """
         DDIM-style sampling in distance space.
         Reconstructs coordinates via the GeoDiff DDPM-noisy update rule.
+
+        FIX: clip_local/clip_global now actually
+        reach eq_transform (GeoDiff's clip_norm, dualenc.py:384-390, default
+        limit=1000) -- previously eq_transform's clip_limit parameter existed
+        but was never passed at this call site, so the high-noise-explosion
+        safety net was silently dead despite being documented as necessary.
+
+        NOTE: `eta` remains an unused/reserved parameter -- this function only
+        ever implements the deterministic (eta=0) DDPM-ancestral update; wiring
+        up genuine eta-stochastic interpolation (GeoDiff dualenc.py's
+        'generalized' branch) is a real formula change deferred to its own
+        reviewed pass rather than bundled into this fix.
         """
         device = atom_types.device
         N = atom_types.size(0)
@@ -1079,8 +1124,21 @@ class DualEncoderDiffusion(nn.Module):
         betas = self.betas
         a_cumprod = self.alphas_cumprod
 
-        # Timestep sequence (last `num_steps` timesteps reversed)
-        seq = list(range(self.num_timesteps - num_steps, self.num_timesteps))
+        # FIX: the previous
+        # `range(num_timesteps - num_steps, num_timesteps)` only ever visited
+        # the highest-noise timesteps (e.g. 4900-4999 of 5000 at num_steps=100)
+        # -- the reverse process never traversed the low-noise region, and the
+        # loop's final step (which hardcodes at_next=1.0, i.e. assumes t=0)
+        # fired at alphas_cumprod~=0.008 instead of ~=1.0, collapsing sampling
+        # to a single one-shot x0 guess from near-pure noise. This produced a
+        # MAT-R/COV-R ceiling independent of training quality (verified
+        # against the real run: COV-R stuck at exactly 0.0% for 100 epochs
+        # while train loss kept declining). Evenly-spaced strided subsampling
+        # over the FULL schedule (matching GeoDiff dualenc.py's own
+        # commented-out alternative) ensures the final step genuinely lands
+        # near t=0.
+        skip = max(self.num_timesteps // num_steps, 1)
+        seq = list(range(0, self.num_timesteps, skip))
         seq_next = [-1] + seq[:-1]
 
         sigmas = (1.0 - a_cumprod).sqrt() / a_cumprod.sqrt().clamp(min=1e-8)
@@ -1097,13 +1155,19 @@ class DualEncoderDiffusion(nn.Module):
             )
 
             # Local force
-            f_local = eq_transform(edge_inv_local, pos, edge_index_local, edge_len_local)
+            f_local = eq_transform(edge_inv_local, pos, edge_index_local, edge_len_local,
+                                    clip_limit=clip_local)
 
-            # Global force (only within cutoff)
+            # Global force (only within cutoff). FIX: dropped the dead `*0`
+            # term (the mask multiply alone is equivalent and this cutoff_mask
+            # is always all-True by construction since edge_index_global comes
+            # from build_radius_graph(..., cutoff=self.cutoff) -- kept as an
+            # explicit guard rather than removed, in case that invariant ever
+            # changes).
             cutoff_mask = (edge_len_global <= self.cutoff)
-            edge_inv_global = edge_inv_global * (1.0 - cutoff_mask.float()) * 0  \
-                              + edge_inv_global * cutoff_mask.float()
-            f_global = eq_transform(edge_inv_global, pos, edge_index_global, edge_len_global)
+            edge_inv_global = edge_inv_global * cutoff_mask.float()
+            f_global = eq_transform(edge_inv_global, pos, edge_index_global, edge_len_global,
+                                     clip_limit=clip_global)
 
             eps_pos = f_local + f_global * w_global
 
@@ -1152,20 +1216,62 @@ class DualEncoderDiffusion(nn.Module):
                                    batch: torch.Tensor,
                                    energy_surrogate,
                                    guidance_scale: float = 1.0,
+                                   guidance_power: float = 0.5,
                                    num_steps: int = 100,
+                                   w_global: float = 0.5,
+                                   clip_pos: Optional[float] = None,
+                                   clip_local: Optional[float] = 1000.0,
+                                   clip_global: Optional[float] = 1000.0,
                                    ) -> torch.Tensor:
         """
-        Energy-guided DDIM: at each step, nudge predicted x₀ toward low energy.
+        Energy-guided DDIM: at each step, nudge predicted x0 toward low energy.
         This is our novel contribution — not in GeoDiff or TorDiff.
+
+        FIX (2026-09, see docs/GEOM_DRUGS_DIAGNOSIS_AND_PLAN.md): two separate bugs.
+
+        1) This function used to recompute pos0_pred with the *scaled*-DDPM formula
+           `(1/at).sqrt()*pos - (1/at-1).sqrt()*e` applied to the already-unscaled
+           `pos` — exactly the coordinate-explosion bug CORrections.md fixed in
+           `ddim_sample` (at t≈T, 1/sqrt(at) blows up ~316x). It then rebuilt the
+           posterior mean a second time with the scaled-space formula and a
+           scaled-space log-variance, discarding the correct unscaled update computed
+           one block above it. Net effect: every call with guidance_scale > 0 would
+           have reproduced the MAT-R 70-80 Å / COV-R 0% failure, just not yet observed
+           because training-time evals always call this with guidance_scale=0.0 (see
+           autoresearch/geom_drugs_eval.py), which never reaches this code path.
+
+        2) `autoresearch/geom_drugs_eval.py`'s `generate_conformers()` calls this
+           function with a `guidance_power=` kwarg (matching the sibling
+           `ConformerDiffusion.energy_guided_ddim_sample` in conformer_diffusion.py,
+           which does accept it) — this function previously had no such parameter, so
+           the very first real call with guidance_scale > 0 would have raised
+           `TypeError: unexpected keyword argument 'guidance_power'` before even
+           reaching bug (1). Added the parameter here for interface parity; the
+           original hardcoded schedule (`guidance_scale * sqrt(1-at)`) is the
+           guidance_power=0.5 special case, so default behavior is unchanged.
+
+        This version reuses the same unscaled math as `ddim_sample` throughout, and
+        only adds the energy-gradient nudge on top of the correctly-scaled x0 estimate.
+
+        FIX: this function previously hardcoded
+        `self.w_global` and had no `clip_pos`/`clip_local`/`clip_global`
+        equivalents to `ddim_sample`'s call-time parameters -- a caller could
+        not reproduce the same sampling configuration through this path that
+        it could through the plain one, and this path in particular adds an
+        extra, otherwise-unbounded perturbation (the energy-surrogate
+        gradient) that arguably needs the clipping safety nets *more* than
+        the unguided sampler does, not less.
         """
         device = atom_types.device
         N = atom_types.size(0)
         B = int(batch.max().item()) + 1
 
         a_cumprod = self.alphas_cumprod
-        betas = self.betas
 
-        seq = list(range(self.num_timesteps - num_steps, self.num_timesteps))
+        # FIX: same truncation bug as
+        # ddim_sample -- see the comment there for the full explanation.
+        skip = max(self.num_timesteps // num_steps, 1)
+        seq = list(range(0, self.num_timesteps, skip))
         seq_next = [-1] + seq[:-1]
         sigmas = (1.0 - a_cumprod).sqrt() / a_cumprod.sqrt().clamp(min=1e-8)
 
@@ -1181,34 +1287,31 @@ class DualEncoderDiffusion(nn.Module):
                 atom_types, pos, bond_index, bond_type, batch, t
             )
 
-            f_local = eq_transform(edge_inv_local, pos, edge_index_local, edge_len_local)
-            f_global = eq_transform(edge_inv_global, pos, edge_index_global, edge_len_global)
-            eps_pos = f_local + f_global * self.w_global
+            f_local = eq_transform(edge_inv_local, pos, edge_index_local, edge_len_local,
+                                    clip_limit=clip_local)
 
-            # ── 3. DDPM-noisy update in unscaled space ──
+            # Cutoff mask + clip, matching ddim_sample.
+            cutoff_mask = (edge_len_global <= self.cutoff)
+            edge_inv_global = edge_inv_global * cutoff_mask.float()
+            f_global = eq_transform(edge_inv_global, pos, edge_index_global, edge_len_global,
+                                     clip_limit=clip_global)
+            eps_pos = f_local + f_global * w_global
+
             at = a_cumprod[i]
             at_next = a_cumprod[j] if j >= 0 else torch.ones(1, device=device)
 
             beta_t = 1.0 - at / at_next
-            e = -eps_pos
+            e = -eps_pos  # network predicts -epsilon
 
+            # Correct unscaled x0 estimate (same as ddim_sample) — NOT the scaled formula.
             sigma_t = (1.0 / at - 1.0).sqrt()
-            pos0_from_e = pos - sigma_t * e
+            pos0_pred = pos - sigma_t * e
 
-            c1 = beta_t / (1.0 - at).clamp(min=1e-8)
-            c2 = (1.0 - beta_t) * (1.0 - at_next) / (1.0 - at).clamp(min=1e-8)
-            mean_eps = c1 * pos0_from_e + c2 * pos
-
-            var_eps = beta_t * (1.0 - at_next) / ((1.0 - at).clamp(min=1e-8) * at_next.clamp(min=1e-8))
-            
-            noise = torch.randn_like(pos)
-            mask = 1.0 - (torch.tensor(i, device=device) == 0).float()
-            pos = mean_eps + mask * torch.sqrt(var_eps.clamp(min=1e-8)) * noise
-            pos0_pred = (1.0 / at).sqrt() * pos - (1.0 / at - 1).sqrt() * e
-
-            # Energy guidance — stronger when denoising is near final (low t → small σ)
-            # Power-law schedule: γ(t) = γ_max * (1 - α_t)^0.5
-            gamma_t = guidance_scale * (1.0 - at).sqrt()
+            # Energy guidance — nudge the *correctly scaled* x0 estimate toward low
+            # energy. Power-law schedule: gamma(t) = guidance_scale * (1-at)^power
+            # (stronger near the end of sampling, where x0 is a reliable estimate).
+            # guidance_power=0.5 reproduces the original hardcoded sqrt(1-at).
+            gamma_t = guidance_scale * (1.0 - at).clamp(min=0).pow(guidance_power)
             if gamma_t > 1e-6 and energy_surrogate is not None:
                 pos0_g = pos0_pred.detach().requires_grad_(True)
                 with torch.enable_grad():
@@ -1218,17 +1321,24 @@ class DualEncoderDiffusion(nn.Module):
                 pos0_pred = pos0_pred - gamma_t * grad_E.detach()
                 pos0_pred = remove_com(pos0_pred, batch)
 
-            # DDPM-noisy update
-            beta_t = 1.0 - at / at_next
-            mean_eps = (
-                (at_next.sqrt() * beta_t) * pos0_pred +
-                ((1 - beta_t).sqrt() * (1 - at_next)) * pos
-            ) / (1.0 - at).clamp(min=1e-8)
+            # Unscaled posterior mean / variance (identical to ddim_sample), using the
+            # (possibly energy-nudged) x0 estimate in place of pos0_from_e.
+            c1 = beta_t / (1.0 - at).clamp(min=1e-8)
+            c2 = (1.0 - beta_t) * (1.0 - at_next) / (1.0 - at).clamp(min=1e-8)
+            mean_eps = c1 * pos0_pred + c2 * pos
+
+            var_eps = beta_t * (1.0 - at_next) / ((1.0 - at).clamp(min=1e-8) * at_next.clamp(min=1e-8))
 
             noise = torch.randn_like(pos)
             mask = 1.0 - (torch.tensor(i, device=device) == 0).float()
-            logvar = beta_t.log().clamp(min=-20)
-            pos = mean_eps + mask * torch.exp(0.5 * logvar) * noise
+            pos = mean_eps + mask * torch.sqrt(var_eps.clamp(min=1e-8)) * noise
+
+            if torch.isnan(pos).any():
+                print(f'  [Warning] NaN at step {i}, resetting to mean')
+                pos = mean_eps
+
             pos = remove_com(pos, batch)
+            if clip_pos is not None:
+                pos = pos.clamp(-clip_pos, clip_pos)
 
         return pos

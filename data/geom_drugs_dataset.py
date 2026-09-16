@@ -161,13 +161,18 @@ class GeomDrugsDataset(Dataset):
 
                 confs = mol['conformers']
 
-                # Recompute Boltzmann weights at custom temperature if needed
+                # Recompute Boltzmann weights at custom temperature if needed.
+                # FIX: removed a dead
+                # loop that used to rebuild each conformer into a fresh local
+                # dict and set 'boltzmann_weight' on it, then discard that
+                # dict without storing it anywhere -- confs/the on-disk record
+                # was never actually updated. Harmless (selection below always
+                # used the correctly-computed local `bws` array, never the
+                # dict field), but misleading dead code. `bws` is the only
+                # thing that needs to exist for the top-K logic that follows.
                 if boltzmann_temp is not None:
                     engs = [c['energy_hartree'] for c in confs]
                     bws  = _boltzmann_weights(engs, boltzmann_temp)
-                    for c, w in zip(confs, bws):
-                        c = dict(c)
-                        c['boltzmann_weight'] = w
                 else:
                     bws = [c.get('boltzmann_weight', 1.0 / len(confs)) for c in confs]
 
@@ -421,6 +426,84 @@ def make_geom_dataloaders(
     )
     val_loader = DataLoader(
         val_subset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=collate_geom,
+        pin_memory=True,
+        drop_last=False,
+        persistent_workers=(num_workers > 0),
+    )
+
+    return train_loader, val_loader
+
+
+def make_geom_dataloaders_from_split(
+    train_path: str,
+    val_path: str,
+    batch_size: int = 16,
+    num_workers: int = 4,
+    max_atoms: int = GEOM_FULL,
+    min_conformers: int = 1,
+    max_conformers: int = 30,
+    max_mols: int = -1,
+    return_energy: bool = False,
+    uniform_sampling: bool = True,
+    seed: int = 42,
+):
+    """
+    Train/val DataLoaders from PRE-SPLIT files (e.g. geom_drugs_train.jsonl /
+    geom_drugs_val.jsonl produced by prepare_geom_drugs_standard.py using GeoMol's
+    canonical split -- see docs/GEOM_DRUGS_DIAGNOSIS_AND_PLAN.md).
+
+    Unlike make_geom_dataloaders(), this does NOT do its own random train/val split
+    -- membership was already decided by the standardized split, so using this
+    function is what makes results comparable to GeoMol/TorDiff/GeoDiff-lineage
+    numbers instead of an ad-hoc internal partition.
+
+    min_conformers defaults to 1 here (not 2): prepare_geom_drugs_standard.py's
+    connectivity QC can legitimately leave a molecule with only 1 clean conformer;
+    dropping those here would silently shrink the split below what was reported
+    when the JSONL was built.
+    """
+    train_ds = GeomDrugsDataset(
+        data_path=train_path,
+        max_atoms=max_atoms,
+        min_conformers=min_conformers,
+        max_conformers=max_conformers,
+        max_mols=max_mols,
+        training_mode=True,
+        uniform_sampling=uniform_sampling,
+        return_energy=return_energy,
+        seed=seed,
+    )
+    val_ds = GeomDrugsDataset(
+        data_path=val_path,
+        max_atoms=max_atoms,
+        min_conformers=min_conformers,
+        max_conformers=max_conformers,
+        max_mols=max_mols,
+        training_mode=False,
+        uniform_sampling=False,
+        return_energy=return_energy,
+        seed=seed,
+    )
+
+    print(f"[GeomDataLoaders:standard-split] train={len(train_ds):,}  val={len(val_ds):,}  "
+          f"batch={batch_size}  workers={num_workers}", flush=True)
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=collate_geom,
+        pin_memory=True,
+        drop_last=True,
+        persistent_workers=(num_workers > 0),
+    )
+    val_loader = DataLoader(
+        val_ds,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
