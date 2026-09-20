@@ -1,3 +1,7 @@
+# CAUTION: the reference values and result arrays hard-coded in this script predate the
+# evaluation fixes in docs/BUGFIXES.md (sections 11-12). RMSD in the logs it reads was
+# averaged over 3N coordinates (true = logged x sqrt(3)), and the reference lines are not
+# the published numbers. Do not cite figures generated from it without re-deriving them.
 """
 visualization/expH_conformer_analysis.py
 =========================================
@@ -76,7 +80,7 @@ def kabsch_rmsd(P: np.ndarray, Q: np.ndarray) -> float:
     U, S, Vt = np.linalg.svd(P.T @ Q)
     D = np.eye(3); D[2,2] = np.sign(np.linalg.det(Vt.T @ U.T))
     R = Vt.T @ D @ U.T
-    return float(np.sqrt(np.mean((P @ R.T - Q)**2)))
+    return float(np.sqrt(np.sum((P @ R.T - Q)**2) / P.shape[0]))
 
 # ─── COV-MAT over swept thresholds ─────────────────────────────────────────────
 def cov_mat_swept(refs, gens, thresholds):

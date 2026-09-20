@@ -1,3 +1,7 @@
+# CAUTION: the reference values and result arrays hard-coded in this script predate the
+# evaluation fixes in docs/BUGFIXES.md (sections 11-12). RMSD in the logs it reads was
+# averaged over 3N coordinates (true = logged x sqrt(3)), and the reference lines are not
+# the published numbers. Do not cite figures generated from it without re-deriving them.
 """
 visualization/expG_publication_plots.py
 ==========================================
@@ -8,13 +12,10 @@ Experiment G: Pure GeoDiff-style E(3)-equivariant diffusion on QM9 (heavy atoms)
   - Dataset      : QM9 heavy atoms (max_atoms=9, ~130K molecules)
   - Checkpoint   : exp_G_heavy_atom_sota_ddp_best.pt (Epoch 321, val_loss=1.064)
   - Training     : 500 epochs COMPLETE  (DDP, 2x RTX 3090, eff. batch=512)
-  - Final eval   : COV-R=96.0%  MAT-R=0.2375 A  (BEATS ALL SOTA!)
+  - Final eval   : COV-R=96.0%  MAT-R=0.2375 A, as logged (pre-fix RMSD; true MAT-R = logged x sqrt(3))
 
-SOTA references (QM9 heavy-atom protocol):
-  GeoDiff (ICML 2022)    : COV-R=71.0%  MAT-R=0.297 A
-  GeoMol  (NeurIPS 2021) : COV-R=71.5%  MAT-R=0.225 A
-  TorDiff (NeurIPS 2022) : COV-R=73.2%  MAT-R=0.219 A
-  Exp G (This work)      : COV-R=96.0%  MAT-R=0.2375 A  ← NEW SOTA on COV-R!
+This run used the single-DFT-geometry QM9 file, not the multi-conformer GEOM-QM9 the published
+numbers use, so these results are not comparable to published COV/MAT values.
 
 16 figures total (8 training + 8 conformer analysis):
   Part A — Training History (from expG_ddp_2637035.log):
@@ -501,7 +502,7 @@ def kabsch_rmsd(P, Q):
     U, S, Vt = np.linalg.svd(P.T @ Q)
     D = np.eye(3); D[2,2] = np.sign(np.linalg.det(Vt.T @ U.T))
     R = Vt.T @ D @ U.T
-    return float(np.sqrt(np.mean((P @ R.T - Q)**2)))
+    return float(np.sqrt(np.sum((P @ R.T - Q)**2) / P.shape[0]))
 
 def cov_mat_swept(refs, gens, thresholds):
     rmsd_mat    = np.array([[kabsch_rmsd(r,g) for g in gens] for r in refs])

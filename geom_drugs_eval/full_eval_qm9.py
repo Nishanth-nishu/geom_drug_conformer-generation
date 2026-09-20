@@ -252,10 +252,10 @@ def main():
         print(f"    {label:8s}: {s}")
 
     print(f"\n{sep}")
-    print(f"  SOTA Reference (QM9 heavy-atom, δ=0.5 Å, 2× conformers):")
-    print(f"    GeoDiff (ICML 2022) : COV-R=71.0%  MAT-R=0.297 Å")
-    print(f"    GeoMol  (NeurIPS 21): COV-R=71.5%  MAT-R=0.225 Å")
-    print(f"    TorDiff (NeurIPS 22): COV-R=73.2%  MAT-R=0.219 Å")
+    print(f"  Published GEOM-QM9 reference (Jing 2022 Table 7, GeoMol split, δ=0.5 Å):")
+    print(f"    GeoDiff (retrained) : COV-R=76.5%  MAT-R=0.297 Å")
+    print(f"    GeoMol              : COV-R=91.5%  MAT-R=0.225 Å")
+    print(f"    TorDiff             : COV-R=92.8%  MAT-R=0.178 Å")
     print(f"{sep}\n")
 
     # ── Visual examples ───────────────────────────────────────────────────────

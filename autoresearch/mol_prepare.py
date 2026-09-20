@@ -128,7 +128,7 @@ def kabsch_rmsd(P: np.ndarray, Q: np.ndarray) -> float:
     U, S, Vt = np.linalg.svd(P.T @ Q)
     D = np.eye(3); D[2,2] = np.sign(np.linalg.det(Vt.T @ U.T))
     R = Vt.T @ D @ U.T
-    return float(np.sqrt(np.mean((P @ R.T - Q)**2)))
+    return float(np.sqrt(np.sum((P @ R.T - Q)**2) / P.shape[0]))
 
 def _bond_valid(pos, anums, esrc, edst, ebo):
     errs = [abs(float(np.linalg.norm(pos[i]-pos[j])) - _ideal_bond(anums[i], anums[j], bo))

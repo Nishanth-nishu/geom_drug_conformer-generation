@@ -14,9 +14,8 @@ Key research references:
   Ganea et al. GeoMol, NeurIPS 2021     — geometry constraints, torsion loss
   Morehead & Cheng GCDM, NeurIPS 2023  — geometry loss t-gating
 
-Expected results at 500 epochs (heavy-atom QM9):
-  COV-R@0.5Å: >55%  (SOTA: GeoDiff 71.0%)
-  MAT-R:      <0.35Å (SOTA: GeoDiff 0.297Å)
+Published GEOM-QM9 reference (Jing 2022 Table 7, GeoMol split): GeoDiff (retrained)
+COV-R 76.5% / MAT-R 0.297 A. Comparable only under the same test set and RMSD variant.
 """
 
 import os
@@ -331,9 +330,9 @@ def main():
     print(f"  Training   : {training_secs/3600:.1f}h  |  Peak VRAM: {peak_vram:.0f} MB")
     print(f"  Parameters : {n_params:.2f}M")
     print()
-    print("SOTA Reference (QM9 heavy-atom):")
-    print("  GeoDiff (ICML 2022): COV-R=71.0%, MAT-R=0.297 Å")
-    print("  GeoMol  (NeurIPS 2021): COV-R=71.5%, MAT-R=0.225 Å")
+    print("Published GEOM-QM9 reference (Jing 2022 Table 7, GeoMol split, 0.5 A):")
+    print("  GeoDiff (retrained): COV-R=76.5%, MAT-R=0.297 Å")
+    print("  GeoMol:              COV-R=91.5%, MAT-R=0.225 Å")
 
 
 if __name__ == '__main__':

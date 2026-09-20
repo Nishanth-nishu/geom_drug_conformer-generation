@@ -22,11 +22,13 @@ Published results on QM9 conformer generation show a large gap between methods:
 
 | Method | MAT-R (Å) | Key feature |
 |--------|-----------|-------------|
-| RDKit ETKDG | 0.297 | Classical, no learning |
+| RDKit ETKDG | 0.235 | Classical, no learning |
 | GeoMol | 0.225 | Torsion prediction + GNN |
-| GeoDiff | 0.297 | Cartesian diffusion (EDM-like) |
-| TorDiff | 0.179 | Diffusion *over* torsion angles |
-| EQGAT-diff | 0.171 | EGNN + attention |
+| GeoDiff (retrained) | 0.297 | Cartesian diffusion (EDM-like) |
+| TorDiff | 0.178 | Diffusion *over* torsion angles |
+
+(Values from Jing et al. 2022, Table 7, GeoMol split. EQGAT-diff is omitted: its
+paper reports unconditional-generation metrics, not conformer RMSD.)
 
 **Key observation:** Methods that explicitly model torsion angles (GeoMol, TorDiff) consistently outperform Cartesian diffusion methods (GeoDiff, EDM). The reason is fundamental to molecular geometry.
 

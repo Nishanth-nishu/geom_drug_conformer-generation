@@ -13,9 +13,13 @@ published conformer generation papers:
 Reference: Xu et al. "GeoDiff: A Geometric Diffusion Model for Molecular Conformation 
 Generation", ICML 2022. Table 1.
 
-Benchmark SOTA on QM9 heavy-atom:
-  GeoMol (NeurIPS 2021): COV-R=71.5%, MAT-R=0.225 Å
-  GeoDiff (ICML 2022):   COV-R=71.0%, MAT-R=0.297 Å
+Published GEOM-QM9 reference points (Jing et al., NeurIPS 2022, Table 7; threshold 0.5 A;
+GeoMol test split; GeoDiff retrained on that split; recall, mean):
+  GeoMol:              COV-R=91.5%, MAT-R=0.225 A
+  GeoDiff (retrained): COV-R=76.5%, MAT-R=0.297 A
+  Torsional Diffusion: COV-R=92.8%, MAT-R=0.178 A
+Only comparable under the same test set, sample count and RMSD variant; the official
+scripts use symmetry-aware RMSD, whereas kabsch_align below uses fixed atom indices.
 
 Usage:
   python autoresearch/geodiff_eval.py --ckpt checkpoints/exp_A_baseline_best.pt
@@ -67,7 +71,7 @@ def kabsch_align(P: np.ndarray, Q: np.ndarray) -> float:
     D[2, 2] = np.sign(np.linalg.det(Vt.T @ U.T))
     R = Vt.T @ D @ U.T
     P_rot = P @ R.T
-    return float(np.sqrt(np.mean((P_rot - Q) ** 2)))
+    return float(np.sqrt(np.sum((P_rot - Q) ** 2) / P.shape[0]))
 
 
 def covmat_single_molecule(ref_conformers: list, gen_conformers: list,
@@ -308,10 +312,10 @@ def print_geodiff_results(results: dict, tag: str = ""):
             count = results['count_by_rot'][k]
             print(f"    {k:6s} : {v:.4f} Å (n={count})")
         print()
-    print("  SOTA Reference (QM9 heavy-atom):")
-    print("    GeoDiff  (ICML 2022):  COV-R=71.0%  MAT-R=0.297 Å")
-    print("    GeoMol   (NeurIPS 2021): COV-R=71.5% MAT-R=0.225 Å")
-    print("    TorDiff  (NeurIPS 2022): COV-R=73.2% MAT-R=0.219 Å")
+    print("  Published GEOM-QM9 reference (Jing 2022 Table 7, GeoMol split, 0.5 A; not protocol-identical to this eval):")
+    print("    GeoDiff (retrained): COV-R=76.5%  MAT-R=0.297 Å")
+    print("    GeoMol:              COV-R=91.5%  MAT-R=0.225 Å")
+    print("    Torsional Diffusion: COV-R=92.8%  MAT-R=0.178 Å")
     print()
 
 

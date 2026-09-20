@@ -22,10 +22,13 @@ v2 Novel energy-aware metrics:
       E[E_surrogate(x_generated)] - E_min_reference  (kcal/mol)
       Measures: are generated conformers thermodynamically stable?
 
-GEOM-Drugs SOTA (GeoDiff paper, Table 2):
-  GeoDiff:     COV-R=56.4%, MAT-R=0.528 A, COV-P=55.5%, MAT-P=0.550 A
-  TorDiff:     COV-R=72.7%, MAT-R=0.481 A, COV-P=55.7%, MAT-P=0.423 A
-  RDKit-ETKDG: COV-R=17.0%, MAT-R=1.153 A
+Published GEOM-Drugs reference points (Jing et al., NeurIPS 2022, Table 1; threshold 0.75 A;
+GeoMol test split; GeoDiff retrained on that split; mean):
+  GeoDiff (retrained): COV-R=42.1%, MAT-R=0.835 A, COV-P=24.9%, MAT-P=1.136 A
+  Torsional Diffusion: COV-R=72.7%, MAT-R=0.582 A, COV-P=55.2%, MAT-P=0.778 A
+  RDKit ETKDG:         COV-R=38.4%, MAT-R=1.058 A, COV-P=40.9%, MAT-P=0.995 A
+Coverage below is reported at 0.5 A, so only the MAT columns are directly comparable
+(and only under the same test set and RMSD variant).
 """
 
 import time
@@ -53,7 +56,7 @@ def kabsch_rmsd(P: np.ndarray, Q: np.ndarray) -> float:
     D = np.eye(3)
     D[2, 2] = np.sign(np.linalg.det(Vt.T @ U.T))
     R = Vt.T @ D @ U.T
-    return float(np.sqrt(np.mean((P @ R.T - Q) ** 2)))
+    return float(np.sqrt(np.sum((P @ R.T - Q) ** 2) / P.shape[0]))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -430,13 +433,13 @@ def print_geom_results(results: Dict, tag: str = ""):
     print()
     print("  Standard Metrics (GeoDiff/TorDiff protocol):")
     print(f"  COV-R@0.5A   : {results.get('cov_r_05', float('nan'))*100:.1f}%"
-          f"  [SOTA: GeoDiff 56.4%, TorDiff 72.7%]")
+          f"  [published @0.75A: GeoDiff 42.1%, TorDiff 72.7%]")
     print(f"  MAT-R        : {results.get('mat_r_mean', float('nan')):.4f} A"
-          f"  [SOTA: GeoDiff 0.528, TorDiff 0.481]")
+          f"  [published: GeoDiff 0.835, TorDiff 0.582]")
     print(f"  COV-P@0.5A   : {results.get('cov_p_05', float('nan'))*100:.1f}%"
-          f"  [SOTA: GeoDiff 55.5%, TorDiff 55.7%]")
+          f"  [published @0.75A: GeoDiff 24.9%, TorDiff 55.2%]")
     print(f"  MAT-P        : {results.get('mat_p_mean', float('nan')):.4f} A"
-          f"  [SOTA: GeoDiff 0.550, TorDiff 0.423]")
+          f"  [published: GeoDiff 1.136, TorDiff 0.778]")
     print()
     print("  v2 Novel Energy-Aware Metrics:")
     bw = results.get('bw_cov_r', float('nan'))

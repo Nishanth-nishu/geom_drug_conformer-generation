@@ -8,9 +8,9 @@
 # Dataset:      GEOM-Drugs (multi-conformer, heavy atoms, ~100k molecules)
 # Evaluation:   COV-R/MAT-R/COV-P/MAT-P (GEOM benchmark protocol)
 #
-# SOTA Targets (GEOM-Drugs, Table 2 from GeoDiff/TorDiff):
-#   GeoDiff (ICML 2022):     COV-R=56.4%, MAT-R=0.528 Å
-#   TorDiff (NeurIPS 2022):  COV-R=72.7%, MAT-R=0.481 Å
+# Published GEOM-Drugs reference (Jing 2022 Table 1, GeoMol split, coverage at 0.75 Å):
+#   GeoDiff (retrained):     COV-R=42.1%, MAT-R=0.835 Å
+#   TorDiff (NeurIPS 2022):  COV-R=72.7%, MAT-R=0.582 Å
 #   OUR TARGET:              COV-R≥50%,   MAT-R≤0.60 Å (competitive first run)
 #
 # Usage:

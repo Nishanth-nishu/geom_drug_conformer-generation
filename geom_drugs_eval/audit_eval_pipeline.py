@@ -272,9 +272,9 @@ def full_reeval(model, val_mols, device, n_mols=100, n_gen=10):
     print(f"  MAT-R       : {mat_r_arr.mean():.4f} Å  ± {mat_r_arr.std():.4f}")
     print(f"  MAT-R  p50  : {np.percentile(mat_r_arr, 50):.4f} Å  (median)")
     print(f"  MAT-R  p90  : {np.percentile(mat_r_arr, 90):.4f} Å  (worst 10%)")
-    print(f"\n  SOTA Reference (QM9 heavy-atom, δ=0.5 Å):")
-    print(f"    GeoDiff (ICML 2022) : COV-R=71.0%  MAT-R=0.297 Å")
-    print(f"    GeoMol  (NeurIPS 21): COV-R=71.5%  MAT-R=0.225 Å")
+    print(f"\n  Published GEOM-QM9 reference (Jing 2022 Table 7, GeoMol split, δ=0.5 Å):")
+    print(f"    GeoDiff (retrained) : COV-R=76.5%  MAT-R=0.297 Å")
+    print(f"    GeoMol              : COV-R=91.5%  MAT-R=0.225 Å")
     print(f"  {'─'*50}\n")
 
 

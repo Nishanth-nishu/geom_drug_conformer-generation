@@ -5,7 +5,8 @@ prepare_qm9_heavy.py — Convert QM9 to heavy-atom-only JSONL format.
 WHY STRIP HYDROGENS?
   GeoDiff (Xu et al. ICML 2022), GeoMol (Ganea et al. NeurIPS 2021), and
   TorDiff (Jing et al. NeurIPS 2022) all evaluate on heavy-atom-only QM9.
-  Their published MAT-R of 0.22-0.30 Å was achieved on 9-atom molecules.
+  Their published QM9 MAT-R values range roughly 0.18-0.30 Å depending on method and split
+  (Jing et al. 2022, Table 7), on molecules of at most 9 heavy atoms.
 
   Our explicit-H QM9 has ~18 atoms/molecule (9 heavy + ~9 H).
   Impact of explicit H:

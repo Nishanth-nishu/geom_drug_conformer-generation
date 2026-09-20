@@ -390,10 +390,15 @@ Evaluation (GeoDiff protocol)
 
 ## 8. Results (exp_G, Epoch 500)
 
+> **Caution:** the "Ours" column was logged with the pre-fix RMSD (true = logged × √3, see
+> `docs/BUGFIXES.md` section 11) on the single-DFT-geometry QM9 file, so it is not comparable
+> to the published columns. The published columns are Jing et al. 2022, Table 7 (GeoMol split,
+> GeoDiff retrained); see section 12.
+
 | Metric | Ours | GeoDiff [GeoDiff] | GeoMol [GeoMol] | TorDiff [TorDiff] |
 |--------|------|-------------------|-----------------|-------------------|
-| COV-R@0.5Å | **95.5%** | 71.0% | 71.5% | 73.2% |
-| MAT-R (Å) | **0.229** | 0.297 | 0.225 | 0.219 |
+| COV-R@0.5Å | 95.5% | 76.5% | 91.5% | 92.8% |
+| MAT-R (Å) | 0.229 | 0.297 | 0.225 | 0.178 |
 | COV-P@0.5Å | **76.2%** | — | — | — |
 | MAT-P (Å) | **0.343** | — | — | — |
 | Diversity (Å) | **0.258** | — | — | — |

@@ -28,9 +28,14 @@ in `models/dual_encoder_diffusion.py`.
 
 `data/prepare_geom_drugs_standard.py` replaces an ad-hoc random 90/10 split
 with:
-- **Split membership** from GeoMol's own published `smiles_splits/split0.npy`
-  (SMILES-string → train/val/test), so results are comparable to the
-  GeoMol/TorsionalDiffusion lineage instead of a private, unverifiable split.
+- **Split membership** from GeoMol's published `smiles_splits/split0.npy`
+  (SMILES-string → train/val/test) instead of a private random split.
+  TorsionalDiffusion's own dataloader consumes GeoMol's index-based
+  `splits/split0.npy`; the two representations were not independently checked
+  to select identical molecules, so comparability with GeoMol/TorsionalDiffusion
+  numbers is approximate. GeoDiff's own paper evaluates on the ConfGF
+  (Shi et al., 2021) split with a 200-molecule test set, so its published
+  numbers are not a same-test-set comparison.
 - **Connectivity QC** (`clean_confs`, matching TorsionalDiffusion's
   `standardize_confs.py`): for each conformer, recompute its 2D bond graph
   from the 3D structure and discard the conformer if it doesn't match the
@@ -166,6 +171,56 @@ coverage value.
 regardless of how many reference conformers it actually had. Fixed to scale
 per molecule as `max(min_gen, gen_multiplier × reference_count)`, matching
 GeoMol/TorDiff's "2x reference count" convention.
+
+## 11. Evaluation RMSD was averaged over 3N coordinates
+
+`kabsch_align` (`autoresearch/geodiff_eval.py`) and the duplicate
+`kabsch_rmsd` implementations (`geom_drugs_eval.py`, `mol_prepare.py`, and two
+visualization scripts) computed `sqrt(mean((P_rot - Q)**2))` on an `(N, 3)`
+array, which divides the summed squared error by `3N` instead of `N`. Every
+reported RMSD, including MAT-R and MAT-P, was therefore the true value divided
+by `√3` (about 1.73x too small), and every coverage threshold was effectively
+`√3` too generous (a "0.5 Å" threshold admitted true RMSD up to about 0.87 Å).
+
+**Fix:** `sqrt(sum((P_rot - Q)**2) / N)`. Checked against SciPy's rotation
+solver (max difference 7e-13 over 300 random cases) and a hand-computed case
+(atoms at ±1 vs ±2 on one axis: RMSD exactly 1.0; the old code gave 0.577).
+
+Ratios between two runs are unaffected. Absolute Å values from logs produced
+before this fix must be multiplied by `√3`; coverage percentages cannot be
+converted without the per-molecule RMSDs. The unaligned coordinate-match check
+in `geom_drugs_eval/convert_to_mol_files.py` has the same form but is a
+tolerance test, not a reported metric, and is unchanged.
+
+## 12. Published reference numbers
+
+Reference values printed by the evaluation and training scripts did not match
+any source (for example GEOM-Drugs "GeoDiff MAT-R 0.528, TorDiff 0.481" and
+QM9 "GeoDiff 71.0%, GeoMol 71.5%, TorDiff 73.2%"). They are replaced with values
+read directly from Jing et al. (NeurIPS 2022), recall, mean, with GeoDiff
+retrained by those authors on the GeoMol split:
+
+| Method | GEOM-Drugs COV-R / MAT-R (Table 1, threshold 0.75 Å) | GEOM-QM9 COV-R / MAT-R (Table 7, threshold 0.5 Å) |
+|---|---|---|
+| RDKit ETKDG | 38.4% / 1.058 Å | 85.1% / 0.235 Å |
+| GeoMol | 44.6% / 0.875 Å | 91.5% / 0.225 Å |
+| GeoDiff (retrained) | 42.1% / 0.835 Å | 76.5% / 0.297 Å |
+| Torsional Diffusion | 72.7% / 0.582 Å | 92.8% / 0.178 Å |
+
+These are comparable to this repo's numbers only under the same test set and
+RMSD variant. The published scripts use symmetry-aware RMSD, this repo uses
+fixed atom indices, and the GEOM-Drugs coverage threshold there is 0.75 Å
+whereas this repo reports coverage at 0.5 Å (only the MAT columns are
+threshold-independent).
+
+The QM9 experiments A-G used the single-DFT-geometry QM9 file (one reference
+conformer per molecule), not the multi-conformer GEOM-QM9 that the published
+numbers use, and their logged RMSDs predate fix 11; they are not comparable to
+any published value. `visualization/expG_publication_plots.py`,
+`visualization/expH_*.py`, `geom_drugs_eval/make_paper_figures.py`, and the
+results tables in `full_flow.md` and `docs/README_exp_D.md` hard-code the older
+values and result arrays; they are marked with a caution rather than
+regenerated.
 
 ## Known, not-yet-fixed limitation
 

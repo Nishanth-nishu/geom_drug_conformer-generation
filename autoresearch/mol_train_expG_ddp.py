@@ -430,9 +430,9 @@ def main():
         print(f"FINAL RESULTS — {EXP_NAME}")
         print("="*65)
         print(f"  COV-R@0.5Å : {final_geo.get('cov_r_05', float('nan'))*100:.1f}%  "
-              f"(SOTA GeoDiff: 71.0%)")
+              f"(published GeoDiff, GeoMol split: 76.5%)")
         print(f"  MAT-R      : {final_geo.get('mat_r_mean', float('nan')):.4f} Å  "
-              f"(SOTA GeoDiff: 0.297 Å)")
+              f"(published GeoDiff, GeoMol split: 0.297 Å)")
         print(f"  COV-P@0.5Å : {final_geo.get('cov_p_05', float('nan'))*100:.1f}%")
         print(f"  MAT-P      : {final_geo.get('mat_p_mean', float('nan')):.4f} Å")
         print(f"  Training   : {training_secs/3600:.1f}h | Peak VRAM/GPU: {peak_vram:.0f} MB")

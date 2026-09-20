@@ -1,3 +1,7 @@
+# CAUTION: the reference values and result arrays hard-coded in this script predate the
+# evaluation fixes in docs/BUGFIXES.md (sections 11-12). RMSD in the logs it reads was
+# averaged over 3N coordinates (true = logged x sqrt(3)), and the reference lines are not
+# the published numbers. Do not cite figures generated from it without re-deriving them.
 """
 make_paper_figures.py — Generate all publication figures for mol_next_gen QM9 results.
 
